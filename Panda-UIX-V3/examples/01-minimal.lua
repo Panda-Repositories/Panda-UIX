@@ -1,7 +1,7 @@
 -- Panda-UIX example 01: the smallest useful hub.
 -- Swap the owner and repo in the URL below for wherever you pushed this.
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 
 local Window = PandaUI:Window({
     Title = "MY HUB",

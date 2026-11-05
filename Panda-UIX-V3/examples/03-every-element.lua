@@ -2,7 +2,7 @@
 -- while building a hub.
 local Players = game:GetService("Players")
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 
 local Window = PandaUI:Window({
     Title = "PANDA HUB",

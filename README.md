@@ -11,7 +11,7 @@ the full API and three runnable examples.
 
 ```lua
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 
 local ok = PandaUI:KeySystem({ Title = "MY HUB", ServiceId = "YOUR_SERVICE_ID" })
 if not ok then return end

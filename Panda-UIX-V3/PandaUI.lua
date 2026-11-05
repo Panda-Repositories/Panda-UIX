@@ -344,11 +344,12 @@ local function buildShell(session, opts)
         return b
     end
 
+    -- Stops short of the one header button so dragging never swallows its click.
     local drag = new("TextButton", {
         Name = "DragHandle",
         Text = "",
         BackgroundTransparency = 1,
-        Size = UDim2.new(1, -80, 1, 0),
+        Size = UDim2.new(1, -48, 1, 0),
         ZIndex = 4,
         Parent = header,
     })
@@ -1667,14 +1668,18 @@ function PandaUI:Window(opts)
     window:SetKeybind(opts.Keybind or Enum.KeyCode.RightAlt)
     env.PandaUIWindows[guiName] = window
 
-    local minimize = shell.headerButton(string.char(226, 136, 146), -64, false)
-    minimize.Name = "Minimize"
     local close = shell.headerButton(string.char(195, 151), -32, true)
     close.Name = "Close"
 
-    session.connect(minimize.Activated, function() window:SetVisible(false) end)
     session.connect(opener.Activated, function() window:SetVisible(true) end)
+    -- X hides. A destroyed session cannot be reopened without re-running the
+    -- script, which is not what someone reaching for the corner of a window
+    -- expects, so tearing down is opt-in through CloseAction = "destroy".
     session.connect(close.Activated, function()
+        if opts.CloseAction ~= "destroy" then
+            window:SetVisible(false)
+            return
+        end
         if opts.ConfirmClose == false then
             window:Destroy()
             return
@@ -1822,15 +1827,21 @@ end
 -- Two shapes reach this: the standalone PUSL-V4 module (lowercase, returns a
 -- result table) and PandaAuthV4 injected by the Kryptic Vault loader
 -- (PascalCase, returns ok/reason/premium). Both collapse to one interface.
-local function adaptProvider(raw, serviceId)
+local function adaptProvider(raw, serviceId, settings)
+    settings = settings or {}
     if type(raw) ~= "table" then return nil, "No key provider available." end
 
     if type(raw.validate) == "function" and type(raw.configure) == "function" then
-        if type(serviceId) ~= "string" or serviceId == "" then
-            return nil, "PUSL-V4 needs a ServiceId; none was supplied."
+        -- A handle someone else already configured (the Kryptic Vault passes
+        -- one in) must not be reconfigured: configure() errors without a
+        -- serviceId, and we do not have theirs.
+        if not settings.skipConfigure then
+            if type(serviceId) ~= "string" or serviceId == "" then
+                return nil, "PUSL-V4 needs a ServiceId; none was supplied."
+            end
+            local ok = pcall(raw.configure, {serviceId = serviceId})
+            if not ok then return nil, "Key provider rejected the service id." end
         end
-        local ok = pcall(raw.configure, {serviceId = serviceId})
-        if not ok then return nil, "Key provider rejected the service id." end
         return {
             kind = "PUSL",
             raw = raw,
@@ -1901,6 +1912,30 @@ local function adaptProvider(raw, serviceId)
         }
     end
 
+    -- A collect-only caller never validates, so a handle that can merely name
+    -- the checkpoint link or the hardware id is still worth adopting.
+    if settings.collect then
+        return {
+            kind = "Collect",
+            raw = raw,
+            expiryText = function() return nil end,
+            keyUrl = function()
+                local fn = raw.getKeyUrl or raw.GetKey
+                if type(fn) ~= "function" then return nil end
+                local okCall, value = pcall(fn)
+                return okCall and value or nil
+            end,
+            hwid = function()
+                local fn = raw.hwid or raw.GetIdentity
+                if type(fn) == "function" then
+                    local okCall, value = pcall(fn)
+                    if okCall and value and tostring(value) ~= "" then return tostring(value) end
+                end
+                return localHwid()
+            end,
+        }
+    end
+
     return nil, "Unrecognised key provider."
 end
 
@@ -1927,6 +1962,111 @@ function PandaUI:KeySystem(opts)
     local guiName = opts.GuiName or "PandaUI_KeySystem"
     local savePath = keyFilePath(opts)
     local persist = opts.Save ~= false
+    -- Collect mode hands the typed key back without checking it, for hosts
+    -- that verify it themselves (the Kryptic Vault key-GUI slot does).
+    local collect = opts.Collect == true
+
+    local function saveKey(key)
+        if not persist then return end
+        writeJson(savePath, {
+            version = 1,
+            key = key,
+            service = opts.ServiceId,
+            username = me.Name,
+            savedAt = os.time(),
+        })
+    end
+
+    local function loadKey()
+        if not persist then return nil end
+        local data = readJson(savePath)
+        if type(data) ~= "table" then return nil end
+        if data.version ~= 1 or type(data.key) ~= "string" or data.key == "" then return nil end
+        if data.username ~= me.Name then return nil end
+        if opts.ServiceId and data.service and data.service ~= opts.ServiceId then return nil end
+        return data.key
+    end
+
+    -- Provider resolution order: an explicitly passed one, the Vault loader's
+    -- injected PandaAuthV4, then a fresh download of PUSL-V4. It runs before any
+    -- UI exists so a key supplied up front can skip the window entirely.
+    local provider, providerError
+    do
+        local raw = opts.Provider or env.PandaAuthV4 or (rawget(_G, "PandaAuthV4"))
+        if not raw and not collect then
+            local serviceId = opts.ServiceId
+            if type(serviceId) ~= "string" or serviceId == "" then
+                providerError = "No service id supplied to KeySystem."
+            else
+                local fetched, err = fetchPusl(opts.LibUrl or DEFAULT_LIB_URL)
+                raw = fetched
+                providerError = err
+            end
+        end
+        if raw then
+            provider, providerError = adaptProvider(raw, opts.ServiceId,
+                {skipConfigure = collect, collect = collect})
+        end
+        -- Collect mode only ever needed the handle for the checkpoint link and
+        -- the hardware id, so not having one is a missing convenience, not a
+        -- reason to refuse the key.
+        if collect then providerError = nil end
+    end
+
+    -- _G.UserKey lets a script hand its key over and skip the gate:
+    --   _G.UserKey = "panda_keyz"
+    --   loadstring(game:HttpGet("...your loader..."))()
+    -- It is read before the window is built, so a working key never flashes one.
+    -- It is ignored once the host has already refused a key, because handing the
+    -- same dead key back would loop the host and this gate forever.
+    local function presetKey()
+        if opts.Error ~= nil and opts.Error ~= "" then return nil end
+        local candidate = env.UserKey
+        if type(candidate) ~= "string" or candidate == "" then
+            candidate = rawget(_G, "UserKey")
+        end
+        if type(candidate) ~= "string" then return nil end
+        candidate = candidate:gsub("^%s+", ""):gsub("%s+$", "")
+        if candidate == "" then return nil end
+        return candidate
+    end
+
+    local function handOff(info)
+        saveKey(info.Key)
+        if opts.OnSuccess then pcall(opts.OnSuccess, info) end
+        if opts.Async then return {done = true, ok = true, reason = "OK", info = info} end
+        return true, info
+    end
+
+    local presetFailure
+    do
+        local preset = presetKey()
+        if preset and collect then
+            return handOff({Key = preset, FromUserKey = true})
+        end
+        if preset and provider then
+            local okCall, result = pcall(provider.validate, preset)
+            if okCall and type(result) == "table" and result.ok then
+                return handOff({
+                    Key = preset,
+                    Premium = result.premium == true,
+                    Expiry = result.expiry,
+                    ExpiryText = provider.expiryText()
+                        or (result.timeLeft and "Timed key" or "Lifetime"),
+                    TimeLeft = result.timeLeft,
+                    Provider = provider.raw,
+                    ProviderKind = provider.kind,
+                    Hwid = provider.hwid(),
+                    FromUserKey = true,
+                })
+            end
+            -- Fall through to the window and say why, rather than dying quietly
+            -- on a key the script author believed was good.
+            local reason = (okCall and type(result) == "table" and result.reason) or "PROTOCOL"
+            presetFailure = "The key in _G.UserKey was refused: "
+                .. (REASON_COPY[reason] or REASON_COPY.UNKNOWN)
+        end
+    end
 
     local session = newSession(guiName)
     local shell = buildShell(session, {
@@ -1983,9 +2123,10 @@ function PandaUI:KeySystem(opts)
     headingText.Position = UDim2.fromOffset(32, 0)
     headingText.Size = UDim2.new(1, -32, 0, 24)
 
-    local intro = label(content, opts.Note
-        or "Paste the key from the checkpoint link. It is checked against the Panda key server, not stored on this device unless you let it save.",
-        11, FONT.Body)
+    local defaultNote = collect
+        and "Paste the key from the checkpoint link. It is sent on to be verified, and is not stored on this device unless you let it save."
+        or "Paste the key from the checkpoint link. It is checked against the Panda key server, not stored on this device unless you let it save."
+    local intro = label(content, opts.Note or defaultNote, 11, FONT.Body)
     intro.TextColor3 = theme.Muted
     intro.TextWrapped = true
     intro.TextXAlignment = Enum.TextXAlignment.Left
@@ -2014,7 +2155,8 @@ function PandaUI:KeySystem(opts)
     session.connect(box.Focused, function() boxStroke.Color = theme.Blue end)
     session.connect(box.FocusLost, function() boxStroke.Color = theme.Line end)
 
-    local checkButton = menuButton(content, "CHECK KEY", 42)
+    local submitText = opts.SubmitText or (collect and "CONTINUE" or "CHECK KEY")
+    local checkButton = menuButton(content, submitText, 42)
     checkButton.Name = "CheckKey"
     checkButton.Position = UDim2.fromOffset(0, 140)
     checkButton.Size = UDim2.new(1, 0, 0, 42)
@@ -2074,7 +2216,7 @@ function PandaUI:KeySystem(opts)
         progressTrack.Visible = busy
         checkButton.Active = not busy
         checkButton.AutoButtonColor = not busy
-        checkButton.Text = busy and "CHECKING..." or "CHECK KEY"
+        checkButton.Text = busy and "CHECKING..." or submitText
         checkButton.BackgroundColor3 = busy and theme.Dim or theme.Blue
     end
 
@@ -2090,56 +2232,23 @@ function PandaUI:KeySystem(opts)
         outcome.done = true
     end
 
-    -- Provider resolution order: an explicitly passed one, the Vault loader's
-    -- injected PandaAuthV4, then a fresh download of PUSL-V4.
-    local provider, providerError
-    do
-        local raw = opts.Provider or env.PandaAuthV4 or (rawget(_G, "PandaAuthV4"))
-        if not raw then
-            local serviceId = opts.ServiceId
-            if type(serviceId) ~= "string" or serviceId == "" then
-                providerError = "No service id supplied to KeySystem."
-            else
-                local fetched, err = fetchPusl(opts.LibUrl or DEFAULT_LIB_URL)
-                raw = fetched
-                providerError = err
-            end
-        end
-        if raw then provider, providerError = adaptProvider(raw, opts.ServiceId) end
-    end
-
-    if provider then
-        local id = provider.hwid()
+    if provider or collect then
+        local id = provider and provider.hwid() or localHwid()
         hwidValue.Text = id or "Unavailable on this executor"
-        footer.left.Text = provider.kind == "PandaAuthV4" and "VAULT AUTH" or "PUSL-V4"
-        setStatus("Waiting for a key")
+        if provider and provider.kind == "PandaAuthV4" then footer.left.Text = "VAULT AUTH" end
+        if presetFailure then
+            setStatus(presetFailure, theme.Bad)
+        elseif opts.Error and opts.Error ~= "" then
+            setStatus(opts.Error, theme.Bad)
+        else
+            setStatus("Waiting for a key")
+        end
     else
         hwidValue.Text = localHwid() or "Unavailable on this executor"
         setStatus(providerError or "Key provider unavailable", theme.Bad)
         setBusy(false)
         checkButton.Active = false
         checkButton.BackgroundColor3 = theme.Dim
-    end
-
-    local function saveKey(key)
-        if not persist then return end
-        writeJson(savePath, {
-            version = 1,
-            key = key,
-            service = opts.ServiceId,
-            username = me.Name,
-            savedAt = os.time(),
-        })
-    end
-
-    local function loadKey()
-        if not persist then return nil end
-        local data = readJson(savePath)
-        if type(data) ~= "table" then return nil end
-        if data.version ~= 1 or type(data.key) ~= "string" or data.key == "" then return nil end
-        if data.username ~= me.Name then return nil end
-        if opts.ServiceId and data.service and data.service ~= opts.ServiceId then return nil end
-        return data.key
     end
 
     local function succeed(key, result)
@@ -2165,10 +2274,19 @@ function PandaUI:KeySystem(opts)
     -- Retries are only ever spent on transient reasons, and the user can see
     -- the wait tick down instead of staring at a frozen button.
     local function attempt(key, silent)
-        if busy or not provider or outcome.done then return end
+        if busy or outcome.done then return end
+        if not collect and not provider then return end
         key = tostring(key or ""):gsub("^%s+", ""):gsub("%s+$", "")
         if key == "" then
             setStatus(REASON_COPY.NO_KEY, theme.Bad)
+            return
+        end
+        if collect then
+            saveKey(key)
+            setStatus("Sending your key to be verified")
+            checkButton.Text = "SENT"
+            checkButton.BackgroundColor3 = theme.Good
+            finish(true, "OK", {Key = key})
             return
         end
         setBusy(true)
@@ -2226,17 +2344,6 @@ function PandaUI:KeySystem(opts)
                 or ("Open: " .. clip(url, 70)))
         end,
     })
-    table.insert(secondary, {
-        text = "COPY HWID",
-        run = function()
-            local id = provider and provider.hwid() or localHwid()
-            if not id then
-                setStatus("No hardware id available on this executor", theme.Bad)
-                return
-            end
-            setStatus(copyToClipboard(id) and "Hardware id copied" or "Clipboard unavailable")
-        end,
-    })
     if opts.Discord and opts.Discord ~= "" then
         table.insert(secondary, {
             text = "DISCORD",
@@ -2267,9 +2374,12 @@ function PandaUI:KeySystem(opts)
     session.connect(close.Activated, function() finish(false, "CLOSED") end)
 
     local saved = loadKey()
-    if saved and provider then
+    if saved then
         box.Text = saved
-        attempt(saved, true)
+        -- A host that just rejected a key re-opens this gate with Error set.
+        -- Auto-submitting the very same saved key would loop the two forever.
+        local rejected = (opts.Error ~= nil and opts.Error ~= "") or presetFailure ~= nil
+        if (provider or collect) and not rejected then attempt(saved, true) end
     end
 
     local function teardown()

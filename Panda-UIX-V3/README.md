@@ -48,7 +48,7 @@ other dependency:
 
 ```lua
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 ```
 
 Swap the owner and repo in that URL for wherever you push this. If you would
@@ -67,7 +67,7 @@ Requirements:
 | `game:HttpGet` | downloading PUSL-V4 | pass `Provider` or inline the library |
 | `request` / `http_request` | PUSL-V4 key validation | key system reports `NO_HTTP` |
 | `writefile` / `readfile` / `isfile` | config and saved key | saving is skipped, UI still works |
-| `setclipboard` | GET KEY, COPY HWID | the link is printed to the status bar instead |
+| `setclipboard` | GET KEY, DISCORD | the link is printed to the status bar instead |
 | `gethwid` | hardware id display | shows "Unavailable on this executor" |
 
 Everything optional is probed, never called blind, so a missing global degrades
@@ -79,7 +79,7 @@ to a softer feature rather than an error.
 
 ```lua
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 
 -- 1. Gate. Blocks until the user authenticates or closes the window.
 local ok, auth = PandaUI:KeySystem({
@@ -189,6 +189,28 @@ and a config file is the one thing a user is likely to share in a support thread
 `PandaUI:ClearSavedKey({ SaveFolder = "MyHub" })` removes it on demand; the
 **FORGET SAVED KEY** button on the gate does the same thing.
 
+### Skipping the gate with `_G.UserKey`
+
+A script can hand its key in and never see the gate:
+
+```lua
+_G.UserKey = "panda_keyz"
+loadstring(game:HttpGet("https://your-host.example/loader.lua"))()
+```
+
+`KeySystem` reads `_G.UserKey` (and `getgenv().UserKey`) **before it builds
+anything**, so a working key goes straight through to the main script with no
+window at all. The returned `auth` carries `FromUserKey = true`. In `Collect`
+mode the key is handed back to the host unchecked, same as a typed one.
+
+If the key is refused the gate opens as usual, with the reason on the status bar
+rather than failing silently. Two guards keep it honest:
+
+- It is ignored whenever `Error` is set, so a host that already refused a key is
+  never handed the same one straight back.
+- A refused preset key also suppresses the saved-key auto-submit, since the file
+  usually holds that very key.
+
 ### Running the gate without blocking
 
 Pass `Async = true` and you get a polling table back instead of a blocked thread:
@@ -197,6 +219,37 @@ Pass `Async = true` and you get a polling table back instead of a blocked thread
 local gate = PandaUI:KeySystem({ ServiceId = "...", Async = true, OnSuccess = start })
 -- gate.done, gate.ok, gate.reason, gate.info
 ```
+
+### Collecting a key for someone else to verify
+
+Some hosts verify the key themselves and only want the GUI. The **Kryptic Vault
+key-GUI slot** is one: it hands your GUI a `context`, expects the typed key back,
+calls PUSL-V4 itself, and re-opens the GUI with `context.error` set if the key
+was refused. `Collect = true` fits that contract.
+
+```lua
+local context = ...   -- the Vault passes auth, scriptId, gameId, placeId, error
+
+local ok, result = PandaUI:KeySystem({
+    Title     = "MY HUB",
+    Collect   = true,              -- hand the key back, do not validate it
+    Provider  = context.auth,      -- already configured, used for GET KEY / HWID
+    GetKeyUrl = context.getKeyUrl, -- plain string fallback
+    Error     = context.error,     -- the host's previous verdict, shown in red
+    SaveFile  = "MyHub/" .. tostring(context.scriptId) .. ".json",
+})
+return ok and result.Key or nil    -- nil cancels, per the Vault contract
+```
+
+In collect mode nothing is validated here, so `ServiceId` is not required and an
+already-configured `Provider` is never reconfigured. Two details matter:
+
+- A saved key is **not** auto-submitted while `Error` is set. Otherwise the host
+  would reject a key, re-open the gate, get the same saved key straight back,
+  and the two would loop forever.
+- The saved key is written before anyone has verified it. If the host reports it
+  as invalid, clear it: `if context.error:lower():find("invalid", 1, true) then
+  PandaUI:ClearSavedKey({ SaveFile = path }) end`.
 
 ---
 
@@ -213,10 +266,19 @@ local Window = PandaUI:Window({
     Status       = "Ready",
     SidebarWidth = 170,
     Metrics      = true,                     -- FPS and ping in the footer
-    ConfirmClose = true,                     -- ask before tearing down
+    CloseAction  = "hide",                   -- "hide" (default) or "destroy"
+    ConfirmClose = true,                     -- only with CloseAction = "destroy"
     GuiName      = "PandaUI_MyHub",          -- ScreenGui name, also the reuse key
 })
 ```
+
+The header carries one button: **×**, which **hides** the window. The opener
+button then brings it back, as does the keybind. A destroyed session cannot be
+reopened without re-running the script, so tearing down is opt-in:
+`CloseAction = "destroy"` makes × call `Window:Destroy()` after a confirmation
+(`ConfirmClose = false` skips the confirmation). Either way `Window:Destroy()`
+is always available to call yourself, which is the right place for a
+"close and restore everything" button of your own.
 
 | Method | Does |
 |---|---|
@@ -453,7 +515,7 @@ different titles are two separate windows by design.
 |---|---|
 | `PandaUI.Version` | string |
 | `PandaUI.Theme` | table of `Color3`, see [Theme](#theme) |
-| `PandaUI:KeySystem(opts)` | `-> ok, auth` (blocking) or `-> gate` (`Async`) |
+| `PandaUI:KeySystem(opts)` | `-> ok, auth` (blocking) or `-> gate` (`Async`); `Collect` returns the typed key |
 | `PandaUI:Window(opts)` | `-> Window` |
 | `PandaUI:Session()` | `-> info` with `:GameName(fn)`, `:Thumbnail(fn)` |
 | `PandaUI:Avatar(column, opts)` | `-> { Instance, Image }` |

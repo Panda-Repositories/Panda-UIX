@@ -5,7 +5,7 @@
 -- NOT kick on a rate limit or a dropped request: those are retried, because
 -- neither one means the key is bad.
 local PandaUI = loadstring(game:HttpGet(
-    "https://raw.githubusercontent.com/SkieHackerYT/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
+    "https://raw.githubusercontent.com/Panda-Repositories/Panda-UIX/main/Panda-UIX-V3/PandaUI.lua"))()
 
 local ok, auth = PandaUI:KeySystem({
     Title = "MY HUB",
